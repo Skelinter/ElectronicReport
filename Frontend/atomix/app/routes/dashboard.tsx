@@ -761,7 +761,7 @@ export default function DashboardPage(): React.ReactElement {
     }
 
     if (!canStartScheduleNow(selectedSchedule)) {
-      showToast("сейчас нельзя начать выбранную смену", "info");
+      showToast("Сейчас нельзя начать выбранную смену", "info");
       return;
     }
 
@@ -1228,7 +1228,7 @@ export default function DashboardPage(): React.ReactElement {
 
           {!isSelectedScheduleStartAvailable ? (
             <div className="dashboard-modal-note">
-              сейчас нельзя начать выбранную смену
+              Сейчас нельзя начать выбранную смену
             </div>
           ) : null}
         </div>
