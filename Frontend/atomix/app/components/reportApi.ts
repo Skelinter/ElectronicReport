@@ -209,3 +209,39 @@ export function fetchDailyReportPdf(departmentId: string, date: string): Promise
 
   return requestBlob(`/api/reports/daily/pdf?${params.toString()}`, undefined, "application/pdf");
 }
+
+export type PagedReportItem = {
+  departmentId: string;
+  departmentName: string;
+  departmentShortName: string;
+  date: string;           // LocalDate в формате YYYY-MM-DD
+  shiftId: string | null;
+  reportId: string | null;
+};
+
+export type PagedReportsResponse = {
+  content: PagedReportItem[];
+  totalElements: number;
+  totalPages: number;
+  size: number;
+  number: number;        // номер текущей страницы (0‑индекс)
+};
+
+export function fetchPagedReports(
+  departmentId: string | null,
+  dateFrom: string,
+  dateTo: string,
+  search: string,
+  page: number,
+  pageSize: number
+): Promise<PagedReportsResponse> {
+  const params = new URLSearchParams();
+  if (departmentId) params.append('departmentId', departmentId);
+  params.append('dateFrom', dateFrom);
+  params.append('dateTo', dateTo);
+  if (search) params.append('search', search);
+  params.append('page', String(page));
+  params.append('size', String(pageSize));
+
+  return requestJson<PagedReportsResponse>(`/api/reports/paged?${params.toString()}`);
+}

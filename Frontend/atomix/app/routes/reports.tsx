@@ -4,9 +4,9 @@ import { SvgIcon } from "~/components/svg-icon";
 import { UiPagination } from "~/components/ui-pagination";
 import {
   fetchReportDepartments,
-  fetchReportPeriod,
+  fetchPagedReports,
   type EmployeeDepartmentOptionResponse,
-  type ReportPeriodColumnResponse
+  type PagedReportItem,
 } from "~/components/reportApi";
 import { getStoredAuthUser } from "~/lib/auth";
 
@@ -14,14 +14,6 @@ type DatePeriodMode = "all" | "single" | "range";
 
 const ALL_REPORTS_DATE_FROM = "2000-01-01";
 const REPORTS_PAGE_SIZE = 10;
-
-type ReportsArchiveRow = {
-  id: string;
-  date: string;
-  departmentId: string;
-  departmentName: string;
-  departmentShortName: string;
-};
 
 function getTodayIsoDate(): string {
   const now = new Date();
@@ -36,7 +28,7 @@ function formatRussianDate(value: string): string {
   return date.toLocaleDateString("ru-RU", {
     day: "2-digit",
     month: "2-digit",
-    year: "numeric"
+    year: "numeric",
   });
 }
 
@@ -82,141 +74,6 @@ function getDepartmentLabel(department: EmployeeDepartmentOptionResponse): strin
   return department.shortName?.trim() || department.name || "Без названия";
 }
 
-function normalizeDepartmentSearch(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function hasReportData(column: ReportPeriodColumnResponse): boolean {
-  return column.columnStatus === "HAS_SHIFT" || Boolean(column.reportId || column.shiftId);
-}
-
-function mergeArchiveRows(rows: ReportsArchiveRow[]): ReportsArchiveRow[] {
-  const merged = new Map<string, ReportsArchiveRow>();
-
-  rows.forEach((row) => {
-    const key = `${row.departmentId}_${row.date}`;
-    const current = merged.get(key);
-
-    if (!current) {
-      merged.set(key, row);
-      return;
-    }
-
-    merged.set(key, {
-      ...current,
-      departmentName: current.departmentName || row.departmentName,
-      departmentShortName:
-        current.departmentShortName || row.departmentShortName,
-    });
-  });
-
-  return Array.from(merged.values()).sort((a, b) => {
-    const dateCompare = b.date.localeCompare(a.date);
-    if (dateCompare !== 0) return dateCompare;
-    return a.departmentShortName.localeCompare(b.departmentShortName, "ru");
-  });
-}
-
-function buildRowsFromPeriod(
-  department: EmployeeDepartmentOptionResponse,
-  columns: ReportPeriodColumnResponse[],
-): ReportsArchiveRow[] {
-  const departmentShortName = getDepartmentLabel(department);
-  const departmentName = department.name || departmentShortName;
-  const rows = columns
-    .filter(hasReportData)
-    .map((column) => column.date)
-    .filter(Boolean)
-    .map((date) => ({
-      id: `${date}_${department.departmentId}`,
-      date,
-      departmentId: department.departmentId,
-      departmentName,
-      departmentShortName,
-    }));
-
-  return mergeArchiveRows(rows);
-}
-
-function isDuplicateShiftError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return message.toLowerCase().includes("несколько смен");
-}
-
-function parseIsoDate(value: string): Date {
-  return new Date(`${value}T00:00:00Z`);
-}
-
-function formatIsoDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function addDays(value: string, days: number): string {
-  const date = parseIsoDate(value);
-  date.setUTCDate(date.getUTCDate() + days);
-  return formatIsoDate(date);
-}
-
-function getDateDiffInDays(dateFrom: string, dateTo: string): number {
-  const start = parseIsoDate(dateFrom).getTime();
-  const end = parseIsoDate(dateTo).getTime();
-  return Math.round((end - start) / 86_400_000);
-}
-
-function getMiddleDate(dateFrom: string, dateTo: string): string {
-  const diffInDays = getDateDiffInDays(dateFrom, dateTo);
-  return addDays(dateFrom, Math.floor(diffInDays / 2));
-}
-
-function buildMergedDuplicateRow(
-  department: EmployeeDepartmentOptionResponse,
-  date: string,
-): ReportsArchiveRow {
-  const departmentShortName = getDepartmentLabel(department);
-  const departmentName = department.name || departmentShortName;
-
-  return {
-    id: `${date}_${department.departmentId}`,
-    date,
-    departmentId: department.departmentId,
-    departmentName,
-    departmentShortName,
-  };
-}
-
-async function loadRowsFromPeriodSafely(
-  department: EmployeeDepartmentOptionResponse,
-  dateFrom: string,
-  dateTo: string,
-): Promise<ReportsArchiveRow[]> {
-  try {
-    const period = await fetchReportPeriod(
-      department.departmentId,
-      dateFrom,
-      dateTo,
-    );
-    return buildRowsFromPeriod(department, period.columns ?? []);
-  } catch (error) {
-    if (!isDuplicateShiftError(error)) {
-      throw error;
-    }
-
-    if (dateFrom === dateTo) {
-      return [buildMergedDuplicateRow(department, dateFrom)];
-    }
-
-    const middleDate = getMiddleDate(dateFrom, dateTo);
-    const nextDate = addDays(middleDate, 1);
-
-    const [leftRows, rightRows] = await Promise.all([
-      loadRowsFromPeriodSafely(department, dateFrom, middleDate),
-      loadRowsFromPeriodSafely(department, nextDate, dateTo),
-    ]);
-
-    return mergeArchiveRows([...leftRows, ...rightRows]);
-  }
-}
-
 export default function ReportsPage(): React.ReactElement {
   const navigate = useNavigate();
   const authUser = useMemo(() => getStoredAuthUser(), []);
@@ -235,11 +92,14 @@ export default function ReportsPage(): React.ReactElement {
   const [departmentId, setDepartmentId] = useState("all");
   const [searchValue, setSearchValue] = useState("");
   const [departments, setDepartments] = useState<EmployeeDepartmentOptionResponse[]>([]);
-  const [archiveRowsFromDb, setArchiveRowsFromDb] = useState<ReportsArchiveRow[]>([]);
   const [isDepartmentsLoading, setIsDepartmentsLoading] = useState(true);
   const [isReportsLoading, setIsReportsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
+
+  const [pagedContent, setPagedContent] = useState<PagedReportItem[]>([]);
+  const [totalItems, setTotalItems] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
 
   useEffect(() => {
     if (!isDatePickerOpen) {
@@ -316,60 +176,46 @@ export default function ReportsPage(): React.ReactElement {
   const datePeriodLabel = isAllReportsMode ? "Все существующие рапорты" : formatDatePeriodLabel(dateFrom, dateTo);
 
   useEffect(() => {
+    setCurrentPage(1);
+  }, [departmentId, searchValue, requestedDateFrom, requestedDateTo]);
+
+  useEffect(() => {
     let isMounted = true;
 
-    const loadReports = async () => {
+    const loadPagedReports = async () => {
       if (isDepartmentsLoading || isInvalidRange) {
-        setArchiveRowsFromDb([]);
+        setPagedContent([]);
+        setTotalItems(0);
+        setTotalPages(1);
         return;
       }
 
-      const selectedDepartments = departments.filter((department) => {
-        if (departmentId === "all") return true;
-        return department.departmentId === departmentId;
-      });
-
-      if (selectedDepartments.length === 0) {
-        setArchiveRowsFromDb([]);
-        return;
-      }
+      const deptId = departmentId === "all" ? null : departmentId;
 
       try {
         setIsReportsLoading(true);
         setErrorMessage("");
 
-        const settledResults = await Promise.allSettled(
-          selectedDepartments.map((department) =>
-            loadRowsFromPeriodSafely(
-              department,
-              requestedDateFrom,
-              requestedDateTo,
-            ),
-          ),
+        const response = await fetchPagedReports(
+          deptId,
+          requestedDateFrom,
+          requestedDateTo,
+          searchValue,
+          currentPage - 1,
+          REPORTS_PAGE_SIZE
         );
 
         if (!isMounted) return;
 
-        const loadedRows = mergeArchiveRows(
-          settledResults.flatMap((result) =>
-            result.status === "fulfilled" ? result.value : [],
-          ),
-        );
-
-        setArchiveRowsFromDb(loadedRows);
-
-        const failedCount = settledResults.filter((result) => result.status === "rejected").length;
-        if (failedCount === selectedDepartments.length) {
-          const firstError = settledResults.find((result) => result.status === "rejected");
-          const reason = firstError?.status === "rejected" ? firstError.reason : null;
-          setErrorMessage(reason instanceof Error ? reason.message : "Не удалось загрузить список рапортов из БД.");
-        } else if (failedCount > 0) {
-          setErrorMessage("Часть подразделений не удалось загрузить. Показаны доступные рапорты.");
-        }
+        setPagedContent(response.content);
+        setTotalItems(response.totalElements);
+        setTotalPages(response.totalPages);
       } catch (error) {
         if (!isMounted) return;
-        setArchiveRowsFromDb([]);
-        setErrorMessage(error instanceof Error ? error.message : "Не удалось загрузить список рапортов из БД.");
+        setPagedContent([]);
+        setTotalItems(0);
+        setTotalPages(1);
+        setErrorMessage(error instanceof Error ? error.message : "Не удалось загрузить список рапортов.");
       } finally {
         if (isMounted) {
           setIsReportsLoading(false);
@@ -377,40 +223,12 @@ export default function ReportsPage(): React.ReactElement {
       }
     };
 
-    void loadReports();
+    void loadPagedReports();
 
     return () => {
       isMounted = false;
     };
-  }, [departmentId, departments, isDepartmentsLoading, isInvalidRange, requestedDateFrom, requestedDateTo]);
-
-  const archiveRows = useMemo<ReportsArchiveRow[]>(() => {
-    const normalizedSearch = normalizeDepartmentSearch(searchValue);
-
-    if (!normalizedSearch) return archiveRowsFromDb;
-
-    return archiveRowsFromDb.filter((row) => {
-      const fullName = row.departmentName.toLowerCase();
-      const shortName = row.departmentShortName.toLowerCase();
-      return fullName.includes(normalizedSearch) || shortName.includes(normalizedSearch);
-    });
-  }, [archiveRowsFromDb, searchValue]);
-
-  const totalReportsCount = archiveRows.length;
-  const totalPages = Math.max(1, Math.ceil(totalReportsCount / REPORTS_PAGE_SIZE));
-  const safeCurrentPage = Math.min(currentPage, totalPages);
-  const pageStartIndex = (safeCurrentPage - 1) * REPORTS_PAGE_SIZE;
-  const paginatedArchiveRows = archiveRows.slice(pageStartIndex, pageStartIndex + REPORTS_PAGE_SIZE);
-
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [departmentId, searchValue, requestedDateFrom, requestedDateTo]);
-
-  useEffect(() => {
-    if (currentPage > totalPages) {
-      setCurrentPage(totalPages);
-    }
-  }, [currentPage, totalPages]);
+  }, [departmentId, requestedDateFrom, requestedDateTo, searchValue, currentPage, isDepartmentsLoading, isInvalidRange]);
 
   const isLoading = isDepartmentsLoading || isReportsLoading;
 
@@ -487,11 +305,11 @@ export default function ReportsPage(): React.ReactElement {
     setIsDatePickerOpen(false);
   };
 
-  const handleOpenReport = (row: ReportsArchiveRow): void => {
+  const handleOpenReport = (row: PagedReportItem): void => {
     const params = new URLSearchParams({
       departmentId: row.departmentId,
       departmentName: row.departmentName,
-      date: row.date
+      date: row.date,
     });
 
     navigate(`/reports/view?${params.toString()}`);
@@ -708,7 +526,6 @@ export default function ReportsPage(): React.ReactElement {
               value={searchValue}
               onChange={(event) => setSearchValue(event.target.value)}
             />
-
           </div>
         </div>
       </section>
@@ -719,12 +536,10 @@ export default function ReportsPage(): React.ReactElement {
         </div>
       ) : null}
 
-
       <section className="ui-card reports-card">
         <div className="ui-card__header">
           <div>
             <h2 className="ui-card__title">Список рапортов</h2>
-            
           </div>
         </div>
 
@@ -739,14 +554,14 @@ export default function ReportsPage(): React.ReactElement {
               </tr>
             </thead>
             <tbody>
-              {isLoading ? (
+              {isLoading && pagedContent.length === 0 ? (
                 <tr>
                   <td colSpan={4} className="ui-empty reports-list-table__empty">Загрузка списка рапортов...</td>
                 </tr>
-              ) : archiveRows.length > 0 ? (
-                paginatedArchiveRows.map((row, index) => (
-                  <tr key={row.id}>
-                    <td>{pageStartIndex + index + 1}</td>
+              ) : pagedContent.length > 0 ? (
+                pagedContent.map((row, index) => (
+                  <tr key={`${row.departmentId}_${row.date}_${row.shiftId}`}>
+                    <td>{(currentPage - 1) * REPORTS_PAGE_SIZE + index + 1}</td>
                     <td className="reports-list-table__date-cell">{formatRussianDate(row.date)}</td>
                     <td>
                       <div className="reports-department-cell">
@@ -757,7 +572,11 @@ export default function ReportsPage(): React.ReactElement {
                       </div>
                     </td>
                     <td>
-                      <button type="button" className="btn btn--primary btn--small" onClick={() => handleOpenReport(row)}>
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--small"
+                        onClick={() => handleOpenReport(row)}
+                      >
                         Открыть
                       </button>
                     </td>
@@ -772,10 +591,10 @@ export default function ReportsPage(): React.ReactElement {
           </table>
         </div>
 
-        {!isLoading ? (
+        {!isLoading && totalPages > 0 ? (
           <UiPagination
-            currentPage={safeCurrentPage}
-            totalItems={totalReportsCount}
+            currentPage={currentPage}
+            totalItems={totalItems}
             pageSize={REPORTS_PAGE_SIZE}
             onPageChange={setCurrentPage}
             className="ui-pagination--attached"
@@ -783,7 +602,7 @@ export default function ReportsPage(): React.ReactElement {
           />
         ) : null}
 
-        {errorMessage && archiveRows.length > 0 ? (
+        {errorMessage && pagedContent.length > 0 ? (
           <div className="reports-card__footer-note">{errorMessage}</div>
         ) : null}
       </section>
